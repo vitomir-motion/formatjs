@@ -68,6 +68,7 @@ test('it passes camelCase-converted arguments to babel API', () => {
       ],
       plugins: [
         '@babel/plugin-proposal-class-properties',
+        '@babel/plugin-proposal-optional-chaining',
         [
           require.resolve('babel-plugin-react-intl'),
           {
@@ -96,6 +97,7 @@ test('it passes camelCase-converted arguments to babel API', () => {
       ],
       plugins: [
         '@babel/plugin-proposal-class-properties',
+        '@babel/plugin-proposal-optional-chaining',
         require.resolve('babel-plugin-const-enum'),
         [
           require.resolve('babel-plugin-react-intl'),

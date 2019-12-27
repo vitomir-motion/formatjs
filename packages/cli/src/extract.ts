@@ -42,6 +42,7 @@ function getBabelConfig(
     // directory of the CLI.
     plugins: [
       '@babel/plugin-proposal-class-properties',
+      '@babel/plugin-proposal-optional-chaining',
       // We want to make sure that `const enum` does not throw an error.
       ...(isTS || isTSX ? [require.resolve('babel-plugin-const-enum')] : []),
       [require.resolve('babel-plugin-react-intl'), reactIntlOptions],
