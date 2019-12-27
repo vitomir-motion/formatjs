@@ -9,7 +9,6 @@ import {
   getMultiInternalSlots,
   getOption,
   getInternalSlot,
-  SignDisplayPattern,
   NotationPattern,
   InternalSlotToken,
   LDMLPluralRule,
@@ -26,6 +25,7 @@ import {
   objectIs,
   unpackData,
   NumberLocaleInternalData,
+  SignPattern,
 } from '@formatjs/intl-utils';
 import {
   toRawFixed,
@@ -765,6 +765,31 @@ function computeExponent(numberFormat: UnifiedNumberFormat, x: number) {
   return computeExponentForMagnitude(numberFormat, magnitude + 1);
 }
 
+function computeCompactThreshold (numberFormat: UnifiedNumberFormat, magnitude: number): DecimalFormatNum | undefined {
+  const {ild, style} = getMultiInternalSlots(__INTERNAL_SLOT_MAP__, numberFormat, 'ild', 'style')
+  const symbols = style === 'decimal' ? ild.decimal : ild.currency;
+  const thresholdMap = symbols.compactLong || symbols.compactShort;
+  if (!thresholdMap) {
+    return;
+  }
+  const num = String(10 ** magnitude) as DecimalFormatNum;
+  const thresholds = Object.keys(thresholdMap) as DecimalFormatNum[]; // TODO: this can be pre-processed
+  if (num < thresholds[0]) {
+    return;
+  }
+  if (num > thresholds[thresholds.length - 1]) {
+    return thresholds[thresholds.length - 1];
+  }
+  let i = thresholds.indexOf(num);
+  for (
+    ;
+    i > 0 &&
+    thresholdMap[thresholds[i - 1]].other === thresholdMap[num].other;
+    i--
+  );
+  return thresholds[i];
+}
+
 /**
  * The abstract operation ComputeExponentForMagnitude computes an exponent by which to scale a
  * number of the given magnitude (power of ten of the most significant digit) according to the
@@ -774,13 +799,13 @@ function computeExponentForMagnitude(
   numberFormat: UnifiedNumberFormat,
   magnitude: number
 ): number {
-  const notation = getInternalSlot(
+  const {notation} = getMultiInternalSlots(
     __INTERNAL_SLOT_MAP__,
     numberFormat,
-    'notation'
+    'notation',
+    'style',
+    'ild'
   );
-  const style = getInternalSlot(__INTERNAL_SLOT_MAP__, numberFormat, 'style');
-  const ild = getInternalSlot(__INTERNAL_SLOT_MAP__, numberFormat, 'ild');
   switch (notation) {
     case 'standard':
       return 0;
@@ -788,29 +813,13 @@ function computeExponentForMagnitude(
       return magnitude;
     case 'engineering':
       return Math.floor(magnitude / 3) * 3;
-    case 'compact': {
-      const symbols = style === 'decimal' ? ild.decimal : ild.currency;
-      const thresholdMap = symbols.compactLong || symbols.compactShort;
-      if (!thresholdMap) {
-        return 0;
+    case 'compact':
+      const threshold = computeCompactThreshold(numberFormat, magnitude)
+      if (!threshold) {
+        return 0
       }
-      const num = String(10 ** magnitude) as DecimalFormatNum;
-      const thresholds = Object.keys(thresholdMap) as DecimalFormatNum[]; // TODO: this can be pre-processed
-      if (num < thresholds[0]) {
-        return 0;
-      }
-      if (num > thresholds[thresholds.length - 1]) {
-        return logBase10(+thresholds[thresholds.length - 1]);
-      }
-      let i = thresholds.indexOf(num);
-      for (
-        ;
-        i > 0 &&
-        thresholdMap[thresholds[i - 1]].other === thresholdMap[num].other;
-        i--
-      );
-      return logBase10(+thresholds[i]);
-    }
+      return logBase10(+threshold)
+    
   }
 }
 
@@ -834,37 +843,7 @@ function getNumberFormatPattern(
     'signDisplay',
     'notation'
   );
-  let patterns: SignDisplayPattern;
 
-  switch (style) {
-    case 'percent':
-      patterns = slots.percent;
-      break;
-    case 'unit': {
-      const unitDisplay = getInternalSlot(
-        __INTERNAL_SLOT_MAP__,
-        numberFormat,
-        'unitDisplay'
-      );
-      const unit = getInternalSlot(__INTERNAL_SLOT_MAP__, numberFormat, 'unit');
-      patterns = slots.unit[unit!][unitDisplay!];
-      break;
-    }
-    case 'currency': {
-      const {currency, currencyDisplay, currencySign} = getMultiInternalSlots(
-        __INTERNAL_SLOT_MAP__,
-        numberFormat,
-        'currency',
-        'currencyDisplay',
-        'currencySign'
-      );
-      patterns = slots.currency[currency!][currencyDisplay][currencySign];
-      break;
-    }
-    case 'decimal':
-      patterns = slots.decimal;
-      break;
-  }
   const notation = getInternalSlot(
     __INTERNAL_SLOT_MAP__,
     numberFormat,
@@ -896,7 +875,72 @@ function getNumberFormatPattern(
     numberFormat,
     'signDisplay'
   );
-  const signPattern = patterns[signDisplay][displayNotation];
+  let patterns: SignPattern;
+
+  switch (style) {
+    case 'percent':
+      invariant(displayNotation !== 'compactLong' && displayNotation !== 'compactShort', 'compactDisplay cannot be compactLong/Short for percent')
+      patterns = slots.percent[signDisplay][displayNotation];
+      break;
+    case 'unit': {
+      const unitDisplay = getInternalSlot(
+        __INTERNAL_SLOT_MAP__,
+        numberFormat,
+        'unitDisplay'
+      );
+      const unit = getInternalSlot(__INTERNAL_SLOT_MAP__, numberFormat, 'unit');
+      invariant(!!unit, 'Unit must be specified')
+      if (displayNotation === 'compactLong' || displayNotation === 'compactShort') {
+        const threshold = computeCompactThreshold(numberFormat, exponent)
+        if (threshold) {
+          patterns = slots.unit[unit][unitDisplay][signDisplay][displayNotation][threshold]
+        } else {
+          patterns = slots.unit[unit][unitDisplay][signDisplay].standard
+        }
+      } else {
+        patterns = slots.unit[unit][unitDisplay][signDisplay][displayNotation];
+      }
+      
+      break;
+    }
+    case 'currency': {
+      const {currency, currencyDisplay, currencySign} = getMultiInternalSlots(
+        __INTERNAL_SLOT_MAP__,
+        numberFormat,
+        'currency',
+        'currencyDisplay',
+        'currencySign'
+      );
+      invariant(!!currency, 'Currency must be specified')
+      if (displayNotation === 'compactLong' || displayNotation === 'compactShort') {
+        const threshold = computeCompactThreshold(numberFormat, exponent)
+        if (threshold) {
+          patterns = slots.currency[currency][currencyDisplay][currencySign][signDisplay][displayNotation][threshold]
+        } else {
+          patterns = slots.currency[currency][currencyDisplay][currencySign][signDisplay].standard
+        }
+      } else {
+        patterns = slots.currency[currency][currencyDisplay][currencySign][signDisplay][displayNotation];
+      }
+      break;
+    }
+    case 'decimal':
+      if (displayNotation === 'compactLong' || displayNotation === 'compactShort') {
+        const threshold = computeCompactThreshold(numberFormat, exponent)
+        if (threshold) {
+          patterns = slots.decimal[signDisplay][displayNotation][threshold]
+        } else {
+          patterns = slots.decimal[signDisplay].standard
+        }
+      } else {
+        patterns = slots.decimal[signDisplay][displayNotation];
+      }
+      
+      break;
+  }
+  
+  const signPattern = patterns;
+  
   let pattern: string;
   if (signDisplay === 'never') {
     pattern = signPattern.zeroPattern;

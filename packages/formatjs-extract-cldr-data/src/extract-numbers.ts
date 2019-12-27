@@ -19,6 +19,7 @@ import {
   LDMLPluralRuleMap,
   DecimalFormatNum,
   RawCurrencyData,
+  InternalSlotToken,
 } from '@formatjs/intl-utils';
 
 const unitsLocales = globSync('*/numbers.json', {
@@ -29,6 +30,23 @@ const unitsLocales = globSync('*/numbers.json', {
 }).map(dirname);
 
 export type Numbers = typeof Numbers['main']['ar']['numbers'];
+
+function extractCompactSymbolILDFromPattern(pattern: string): string {
+  return pattern.split(';')[0].replace(/[¤0\-]/g, '').trim();
+}
+
+function extractCompactSymbolFromPattern(pattern: string, slotToken: InternalSlotToken = InternalSlotToken.compactSymbol): string {
+  const compactUnit = pattern.replace(/[¤0\-]/g, '').trim();
+  return compactUnit ? pattern.replace(compactUnit, `{${slotToken}}`) : pattern
+}
+
+function extractCompactSymbol(patterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>, token: InternalSlotToken = InternalSlotToken.compactSymbol): string {
+  const compactUnit = pattern.replace(/[¤0]/g, '')
+      // In case we're processing half-processed things
+      .replace(/({\w+})/g, '')
+      .trim();
+    result[t] = compactUnit ? pattern.replace(compactUnit, `{${slotToken}}`) : pattern
+}
 
 const COUNTS = [
   '1000',

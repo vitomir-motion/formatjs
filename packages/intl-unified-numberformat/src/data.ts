@@ -11,6 +11,7 @@ import {
   CurrencyPattern,
   LDMLPluralRuleMap,
   NumberLocalePatternData,
+  PercentNotationPattern,
 } from '@formatjs/intl-utils';
 
 const CURRENCY_DISPLAYS: Array<keyof CurrencyPattern> = [
@@ -26,14 +27,6 @@ const SIGN_DISPLAYS: Array<keyof SignDisplayPattern> = [
   'never',
   'exceptZero',
 ];
-
-// What is this number?
-// Context: https://github.com/tc39/proposal-unified-intl-numberformat/issues/26
-// Right now pattern tree does not have room for different compact notation pattern
-// per exponent (e.g for zh-TW, 1000 is just {number}, not {number}K).
-// This number is chosen so we generate the most general pattern for compact, e.g
-// {number}{compactSymbol} or sth like that
-const SPECIAL_NUMBER_HACK = '1000';
 
 const UNIT_DISPLAYS: Array<keyof UnitPattern> = ['narrow', 'long', 'short'];
 
@@ -186,44 +179,71 @@ const dummySignPattern = extractSignPattern(
 
 const scientificSignPattern = extractSignPattern(SCIENTIFIC_SLOT);
 
+function aggregateLDMLOther<T extends string>(map: Record<T, LDMLPluralRuleMap<string>>): Record<T, string> {
+  return (Object.keys(map) as Array<T>).reduce((all, k) => {
+    all[k] = map[k].other
+    return all
+  }, {} as Record<T, string>)
+}
+
 /**
  * Turn compact pattern like `0 trillion` or `¤0 trillion` to
  * `0 {compactSymbol}` or `¤0 {compactSymbol}`
  * @param pattern
  */
-function extractCompactSymbol(
-  pattern: string,
-  slotToken: InternalSlotToken = InternalSlotToken.compactSymbol
-): string {
-  const compactUnit = pattern
-    .replace(/[¤0]/g, '')
-    // In case we're processing half-processed things
-    .replace(/({\w+})/g, '')
-    .trim();
-  return pattern.replace(compactUnit, `{${slotToken}}`);
+function extractCompactSignPattern(
+  patterns: Record<DecimalFormatNum, string>,
+  slotToken: InternalSlotToken = InternalSlotToken.compactSymbol,
+): Record<DecimalFormatNum, string> {
+  const compactThresholds = Object.keys(patterns) as Array<DecimalFormatNum>
+  const result = {} as Record<DecimalFormatNum, string>
+  for (const t of compactThresholds) {
+    const pattern = patterns[t] || ''
+    const compactUnit = pattern.replace(/[¤0]/g, '')
+      // In case we're processing half-processed things
+      .replace(/({\w+})/g, '')
+      .trim();
+    result[t] = compactUnit ? pattern.replace(compactUnit, `{${slotToken}}`) : pattern
+  }
+  return result
+}
+
+function extractSignPatternForCompact(patterns: Record<DecimalFormatNum, string>, compactType: 'compactShort' | 'compactLong'): SignDisplayPattern {
+  const compactThresholds = Object.keys(patterns) as Array<DecimalFormatNum>
+  const result = {
+    auto: {},
+    always: {},
+    never: {},
+    exceptZero: {}
+  } as SignDisplayPattern
+  for (const t of compactThresholds) {
+    const pattern = patterns[t]
+    const signPattern = extractSignPattern(pattern)
+    for (const s of Object.keys(signPattern)) {
+      result[s as 'auto'][compactType][t] = signPattern[s as 'auto']
+    }
+  }
+  return result
 }
 
 function extractDecimalPattern(
   d: RawNumberData,
   numberingSystem: string
 ): SignDisplayPattern {
-  const compactShortSignPattern = extractSignPattern(
-    extractCompactSymbol(
-      d.decimal[numberingSystem].short[SPECIAL_NUMBER_HACK].other
-    )
-  );
-  const compactLongSignPattern = extractSignPattern(
-    extractCompactSymbol(
-      d.decimal[numberingSystem].long[SPECIAL_NUMBER_HACK].other,
-      InternalSlotToken.compactName
-    )
-  );
+  const rawCompactShortSignPattern = extractCompactSignPattern(aggregateLDMLOther(d.decimal[numberingSystem].short))
+  const compactShortSignPattern = extractSignPatternForCompact(rawCompactShortSignPattern, 'compactShort')
+  const rawCompactLongSignPattern = extractCompactSignPattern(
+    aggregateLDMLOther(d.decimal[numberingSystem].long),
+    InternalSlotToken.compactName
+  )
+  const compactLongSignPattern = extractSignPatternForCompact(rawCompactLongSignPattern, 'compactLong')
+    
   return SIGN_DISPLAYS.reduce((all: SignDisplayPattern, k) => {
     all[k] = {
       standard: dummySignPattern[k],
       scientific: scientificSignPattern[k],
-      compactShort: compactShortSignPattern[k],
-      compactLong: compactLongSignPattern[k],
+      compactShort: compactShortSignPattern[k].compactShort,
+      compactLong: compactLongSignPattern[k].compactLong
     };
     return all;
   }, {} as SignDisplayPattern);
@@ -232,20 +252,18 @@ function extractDecimalPattern(
 function extractPercentPattern(
   d: RawNumberData,
   numberingSystem: string
-): SignDisplayPattern {
+): SignDisplayPattern<PercentNotationPattern> {
   const percentSignPattern = extractSignPattern(d.percent[numberingSystem]);
   const scientificPercentSignPattern = extractSignPattern(
     d.percent[numberingSystem].replace(NUMBER_PATTERN, SCIENTIFIC_SLOT)
   );
-  return SIGN_DISPLAYS.reduce((all: SignDisplayPattern, k) => {
+  return SIGN_DISPLAYS.reduce((all, k) => {
     all[k] = {
       standard: percentSignPattern[k],
       scientific: scientificPercentSignPattern[k],
-      compactShort: percentSignPattern[k],
-      compactLong: percentSignPattern[k],
     };
     return all;
-  }, {} as SignDisplayPattern);
+  }, {} as SignDisplayPattern<PercentNotationPattern>);
 }
 
 const INSERT_BEFORE_PATTERN_REGEX = /[^\s(]¤/;
@@ -269,6 +287,22 @@ function shouldInsertAfter(currency: string, pattern: string) {
   );
 }
 
+const DUMMY_COMPACT_LDML_RULE_MAP: LDMLPluralRuleMap<string> = {other: '0'}
+const DUMMY_COMPACT_PATTERN: Record<DecimalFormatNum, LDMLPluralRuleMap<string>> = {
+  '1000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '10000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '100000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '1000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '10000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '100000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '1000000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '10000000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '100000000000': DUMMY_COMPACT_LDML_RULE_MAP, 
+  '1000000000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '10000000000000': DUMMY_COMPACT_LDML_RULE_MAP,
+  '100000000000000': DUMMY_COMPACT_LDML_RULE_MAP,
+}
+
 /**
  *
  * @param currencyUnitPattern
@@ -279,47 +313,42 @@ function shouldInsertAfter(currency: string, pattern: string) {
 function extractStandardCurrencyPattern(
   currencyStandardPattern: string,
   currencyUnitPattern: string,
-  currencyShortPattern: string,
-  decimalShortPattern: string,
-  decimalLongPattern: string,
+  currencyShortPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  decimalShortPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  decimalLongPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
   currencyDisplay: keyof CurrencyPattern
 ) {
   let standardPattern: string;
   let scientificPattern: string;
-  let compactShortPattern: string;
-  let compactLongPattern: string;
+  let compactShortPattern: SignDisplayPattern;
+  let compactLongPattern: SignDisplayPattern;
+
+  // {0} {1} -> {0} {unitSymbol}
+  const unitPatternWithToken = currencyUnitPattern.replace('{1}', `{${InternalSlotToken.currencyName}}`)
+
+  let rawCompactShortSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(decimalShortPatterns))
+  rawCompactShortSignPattern = (Object.keys(rawCompactShortSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactShortSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+
+  let rawCompactLongSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(decimalLongPatterns))
+  rawCompactLongSignPattern = (Object.keys(rawCompactLongSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactLongSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+  const rawCurrencyShortSignPattern = extractCompactSignPattern(aggregateLDMLOther(currencyShortPatterns))
+  
   // For full currency name, we use unitPattern in conjunction with
   // decimal short/long pattern, so
   // `{0} {1}` + `0 thousand` -> `0 thousand {1}` -> {number} {compactName} {currencyName}`
   if (currencyDisplay === 'name') {
-    standardPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0' ? DUMMY_PATTERN : `{${InternalSlotToken.currencyName}}`
-    );
-    scientificPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0' ? SCIENTIFIC_SLOT : `{${InternalSlotToken.currencyName}}`
-    );
-    compactShortPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0'
-          ? extractCompactSymbol(decimalShortPattern)
-          : `{${InternalSlotToken.currencyName}}`
-    );
-
-    compactLongPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0'
-          ? extractCompactSymbol(
-              decimalLongPattern,
-              InternalSlotToken.compactName
-            )
-          : `{${InternalSlotToken.currencyName}}`
-    );
+    standardPattern = unitPatternWithToken.replace('{0}', DUMMY_PATTERN);
+    scientificPattern = unitPatternWithToken.replace('{0}', SCIENTIFIC_SLOT);
+    
+    compactShortPattern = extractSignPatternForCompact(rawCompactShortSignPattern, 'compactShort')
+    
+    compactLongPattern = extractSignPatternForCompact(rawCompactShortSignPattern, 'compactLong')
   }
   // For currency symbol/code, it's trickier
   // standard uses the currency standard pattern
@@ -332,15 +361,15 @@ function extractStandardCurrencyPattern(
       NUMBER_PATTERN,
       SCIENTIFIC_SLOT
     );
-    compactShortPattern = extractCompactSymbol(currencyShortPattern);
-    compactLongPattern = extractCompactSymbol(currencyShortPattern);
+    compactShortPattern = extractSignPatternForCompact(rawCurrencyShortSignPattern, 'compactShort');
+    compactLongPattern = extractSignPatternForCompact(rawCurrencyShortSignPattern, 'compactLong');
   }
   return SIGN_DISPLAYS.reduce((all: SignDisplayPattern, signDisplay) => {
     all[signDisplay] = {
       standard: extractSignPattern(standardPattern)[signDisplay],
       scientific: extractSignPattern(scientificPattern)[signDisplay],
-      compactShort: extractSignPattern(compactShortPattern)[signDisplay],
-      compactLong: extractSignPattern(compactLongPattern)[signDisplay],
+      compactShort: compactShortPattern[signDisplay].compactShort,
+      compactLong: compactLongPattern[signDisplay].compactLong,
     };
     return all;
   }, {} as SignDisplayPattern);
@@ -349,47 +378,40 @@ function extractStandardCurrencyPattern(
 function extractAccountingCurrencyPattern(
   currencyAccountingPattern: string,
   currencyUnitPattern: string,
-  currencyShortPattern: string,
-  decimalShortPattern: string,
-  decimalLongPattern: string,
+  currencyShortPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  decimalShortPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  decimalLongPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
   currencyDisplay: keyof CurrencyPattern
 ) {
   let standardPattern: string;
   let scientificPattern: string;
-  let compactShortPattern: string;
-  let compactLongPattern: string;
+  let compactShortPattern: SignDisplayPattern;
+  let compactLongPattern: SignDisplayPattern;
+
+  // {0} {1} -> {0} {unitSymbol}
+  const unitPatternWithToken = currencyUnitPattern.replace('{1}', `{${InternalSlotToken.currencyName}}`)
+
+  let rawCompactShortSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(decimalShortPatterns))
+  rawCompactShortSignPattern = (Object.keys(rawCompactShortSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactShortSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+  let rawCompactLongSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(decimalLongPatterns))
+  rawCompactLongSignPattern = (Object.keys(rawCompactLongSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactLongSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+  const rawCurrencyShortSignPattern = extractCompactSignPattern(aggregateLDMLOther(currencyShortPatterns))
+
   // For full currency name, we use unitPattern in conjunction with
   // decimal short/long pattern, so
   // `{0} {1}` + `0 thousand` -> `0 thousand {1}` -> {number} {compactName} {currencyName}`
   if (currencyDisplay === 'name') {
-    standardPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0' ? DUMMY_PATTERN : `{${InternalSlotToken.currencyName}}`
-    );
-    scientificPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0' ? SCIENTIFIC_SLOT : `{${InternalSlotToken.currencyName}}`
-    );
-    compactShortPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0'
-          ? extractCompactSymbol(decimalShortPattern)
-          : `{${InternalSlotToken.currencyName}}`
-    );
-
-    compactLongPattern = currencyUnitPattern.replace(
-      STANDARD_PATTERN_REGEX,
-      (_, p) =>
-        p === '0'
-          ? extractCompactSymbol(
-              decimalLongPattern,
-              InternalSlotToken.compactName
-            )
-          : `{${InternalSlotToken.currencyName}}`
-    );
+    standardPattern = unitPatternWithToken.replace('{0}', DUMMY_PATTERN);
+    scientificPattern = unitPatternWithToken.replace('{0}', SCIENTIFIC_SLOT);
+    
+    compactShortPattern = extractSignPatternForCompact(rawCompactShortSignPattern, 'compactShort')
+    compactLongPattern = extractSignPatternForCompact(rawCompactLongSignPattern, 'compactLong')
   }
   // For currency symbol/code, it's trickier
   // standard uses the currency accounting pattern
@@ -402,19 +424,20 @@ function extractAccountingCurrencyPattern(
       NUMBER_PATTERN,
       SCIENTIFIC_SLOT
     );
-    compactShortPattern = extractCompactSymbol(currencyShortPattern);
-    compactLongPattern = extractCompactSymbol(currencyShortPattern);
+    compactShortPattern = extractSignPatternForCompact(rawCurrencyShortSignPattern, 'compactShort');
+    compactLongPattern = extractSignPatternForCompact(rawCurrencyShortSignPattern, 'compactLong');
   }
   return SIGN_DISPLAYS.reduce((all: SignDisplayPattern, signDisplay) => {
     all[signDisplay] = {
       standard: extractSignPattern(standardPattern)[signDisplay],
       scientific: extractSignPattern(scientificPattern)[signDisplay],
-      compactShort: extractSignPattern(compactShortPattern)[signDisplay],
-      compactLong: extractSignPattern(compactLongPattern)[signDisplay],
+      compactShort: compactShortPattern[signDisplay].compactShort,
+      compactLong: compactLongPattern[signDisplay].compactLong
     };
     return all;
   }, {} as SignDisplayPattern);
 }
+
 
 function replaceCurrencySymbolWithToken(
   currency: string,
@@ -422,7 +445,8 @@ function replaceCurrencySymbolWithToken(
   insertBetween: string,
   currencyToken: InternalSlotToken
 ): string {
-  // Check afterCurrency
+  
+    // Check afterCurrency
   if (shouldInsertAfter(currency, pattern)) {
     return pattern.replace(
       CURRENCY_SYMBOL_REGEX,
@@ -437,7 +461,23 @@ function replaceCurrencySymbolWithToken(
       `${insertBetween}{${currencyToken}}`
     );
   }
-  return pattern.replace(CURRENCY_SYMBOL_REGEX, `{${currencyToken}}`);
+    return pattern.replace(CURRENCY_SYMBOL_REGEX, `{${currencyToken}}`);
+}
+
+function replaceCurrencyCompactSymbolWithToken(
+  currency: string,
+  patterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  insertBetween: string,
+  currencyToken: InternalSlotToken
+): Record<DecimalFormatNum, LDMLPluralRuleMap<string>> {
+  return (Object.keys(patterns) as Array<DecimalFormatNum>).reduce((all, num) => {
+    const patternRule = patterns[num]
+    all[num] = (Object.keys(patternRule) as Array<LDMLPluralRule>).reduce((all, ldml) => {
+      all[ldml] = replaceCurrencySymbolWithToken(currency, patternRule[ldml]!, insertBetween, currencyToken)
+      return all
+    }, {} as LDMLPluralRuleMap<string>) 
+    return all
+  }, {} as Record<DecimalFormatNum, LDMLPluralRuleMap<string>>)
 }
 
 function extractCurrencyPatternForCurrency(
@@ -451,29 +491,29 @@ function extractCurrencyPatternForCurrency(
   const currencyStandardPattern = d.currency[numberingSystem].standard;
   const currencyUnitPattern = d.currency[numberingSystem].unitPattern;
   const currencyAccountingPattern = d.currency[numberingSystem].accounting;
-  const currencyShortPattern =
-    d.currency[numberingSystem].short?.[1000].other || '';
-  const decimalShortPattern =
-    d.decimal[numberingSystem].short[SPECIAL_NUMBER_HACK].other;
-  const decimalLongPattern =
-    d.decimal[numberingSystem].long[SPECIAL_NUMBER_HACK].other;
+  const currencyShortPatterns =
+    d.currency[numberingSystem].short || DUMMY_COMPACT_PATTERN;
+  const decimalShortPatterns =
+    d.decimal[numberingSystem].short;
+  const decimalLongPatterns =
+    d.decimal[numberingSystem].long;
   const currencySymbol = c[currency].symbol;
   const currencyNarrowSymbol = c[currency].narrow;
   const standardCurrencyPattern = {
     standard: extractStandardCurrencyPattern(
       currencyStandardPattern,
       currencyUnitPattern,
-      currencyShortPattern,
-      decimalShortPattern,
-      decimalLongPattern,
+      currencyShortPatterns,
+      decimalShortPatterns,
+      decimalLongPatterns,
       'name'
     ),
     accounting: extractAccountingCurrencyPattern(
       currencyAccountingPattern,
       currencyUnitPattern,
-      currencyShortPattern,
-      decimalShortPattern,
-      decimalLongPattern,
+      currencyShortPatterns,
+      decimalShortPatterns,
+      decimalLongPatterns,
       'name'
     ),
   };
@@ -503,14 +543,14 @@ function extractCurrencyPatternForCurrency(
             currencyToken
           ),
           currencyUnitPattern,
-          replaceCurrencySymbolWithToken(
+          replaceCurrencyCompactSymbolWithToken(
             resolvedCurrency,
-            currencyShortPattern,
+            currencyShortPatterns,
             insertBetween,
             currencyToken
           ),
-          decimalShortPattern,
-          decimalLongPattern,
+          decimalShortPatterns,
+          decimalLongPatterns,
           currencyDisplay
         ),
         accounting: extractAccountingCurrencyPattern(
@@ -521,14 +561,14 @@ function extractCurrencyPatternForCurrency(
             currencyToken
           ),
           currencyUnitPattern,
-          replaceCurrencySymbolWithToken(
+          replaceCurrencyCompactSymbolWithToken(
             resolvedCurrency,
-            currencyShortPattern,
+            currencyShortPatterns,
             insertBetween,
             currencyToken
           ),
-          decimalShortPattern,
-          decimalLongPattern,
+          decimalShortPatterns,
+          decimalLongPatterns,
           currencyDisplay
         ),
       };
@@ -537,13 +577,11 @@ function extractCurrencyPatternForCurrency(
   }, {} as CurrencyPattern);
 }
 
-const STANDARD_PATTERN_REGEX = /{(\d)}/g;
-
 function generateUnitPatternPayload(
   unitPatternStr: string,
   display: keyof UnitPattern,
-  compactShortDecimalPattern: string,
-  compactLongDecimalPattern: string
+  compactShortDecimalPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>,
+  compactLongDecimalPatterns: Record<DecimalFormatNum, LDMLPluralRuleMap<string>>
 ) {
   const unitToken =
     display === 'long'
@@ -551,45 +589,34 @@ function generateUnitPatternPayload(
       : display === 'short'
       ? InternalSlotToken.unitSymbol
       : InternalSlotToken.unitNarrowSymbol;
-  const standardUnitPatternStr = unitPatternStr.replace(
-    STANDARD_PATTERN_REGEX,
-    (_, p) => (p === '0' ? DUMMY_PATTERN : `{${unitToken}}`)
-  );
+  // {0} {1} -> {0} {unitSymbol}
+  const unitPatternWithToken = unitPatternStr.replace('{1}', `{${unitToken}}`)
 
-  const scientificUnitPatternStr = unitPatternStr.replace(
-    STANDARD_PATTERN_REGEX,
-    (_, p) => (p === '0' ? SCIENTIFIC_SLOT : `{${unitToken}}`)
-  );
+  const standardUnitPatternStr = unitPatternWithToken.replace('{0}', DUMMY_PATTERN)
+  const scientificUnitPatternStr = unitPatternWithToken.replace('{0}', SCIENTIFIC_SLOT)
 
-  const compactShortUnitPatternStr = unitPatternStr.replace(
-    STANDARD_PATTERN_REGEX,
-    (_, p) =>
-      p === '0'
-        ? extractCompactSymbol(compactShortDecimalPattern)
-        : `{${unitToken}}`
-  );
-
-  const compactLongUnitPatternStr = unitPatternStr.replace(
-    STANDARD_PATTERN_REGEX,
-    (_, p) =>
-      p === '0'
-        ? extractCompactSymbol(
-            compactLongDecimalPattern,
-            InternalSlotToken.compactName
-          )
-        : `{${unitToken}}`
-  );
+  let rawCompactShortSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(compactShortDecimalPatterns))
+  rawCompactShortSignPattern = (Object.keys(rawCompactShortSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactShortSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+  const compactShortSignPattern = extractSignPatternForCompact(rawCompactShortSignPattern, 'compactShort')
+  
+  let rawCompactLongSignPattern: Record<DecimalFormatNum, string> = extractCompactSignPattern(aggregateLDMLOther(compactLongDecimalPatterns))
+  rawCompactLongSignPattern = (Object.keys(rawCompactLongSignPattern) as Array<DecimalFormatNum>).reduce((all, k) => {
+    all[k] = unitPatternWithToken.replace('{0}', rawCompactLongSignPattern[k]) 
+    return all
+  }, {} as Record<DecimalFormatNum, string>)
+  const compactLongSignPattern = extractSignPatternForCompact(rawCompactLongSignPattern, 'compactLong')
 
   const standard = extractSignPattern(standardUnitPatternStr);
   const scientific = extractSignPattern(scientificUnitPatternStr);
-  const compactShort = extractSignPattern(compactShortUnitPatternStr);
-  const compactLong = extractSignPattern(compactLongUnitPatternStr);
   return SIGN_DISPLAYS.reduce((all: SignDisplayPattern, k) => {
     all[k] = {
       standard: standard[k],
       scientific: scientific[k],
-      compactShort: compactShort[k],
-      compactLong: compactLong[k],
+      compactShort: compactShortSignPattern[k].compactShort,
+      compactLong: compactLongSignPattern[k].compactLong,
     };
     return all;
   }, {} as SignDisplayPattern);
@@ -607,8 +634,8 @@ function extractUnitPatternForUnit(
     patterns[unitDisplay] = generateUnitPatternPayload(
       unitData[unitDisplay].other.pattern,
       unitDisplay,
-      d.decimal[numberingSystem].short[SPECIAL_NUMBER_HACK].other,
-      d.decimal[numberingSystem].long[SPECIAL_NUMBER_HACK].other
+      d.decimal[numberingSystem].short,
+      d.decimal[numberingSystem].long
     );
   }
   return patterns;

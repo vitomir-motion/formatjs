@@ -55,18 +55,22 @@ export interface SignPattern {
   negativePattern: string;
 }
 
+export type CompactSignPattern = Record<DecimalFormatNum, SignPattern>
+
 export interface NotationPattern {
   standard: SignPattern;
   scientific: SignPattern;
-  compactShort: SignPattern;
-  compactLong: SignPattern;
+  compactShort: CompactSignPattern;
+  compactLong: CompactSignPattern;
 }
 
-export interface SignDisplayPattern {
-  auto: NotationPattern;
-  always: NotationPattern;
-  never: NotationPattern;
-  exceptZero: NotationPattern;
+export type PercentNotationPattern = Omit<NotationPattern, 'compactShort' | 'compactLong'>
+
+export interface SignDisplayPattern<T = NotationPattern> {
+  auto: T;
+  always: T;
+  never: T;
+  exceptZero: T;
 }
 
 export interface CurrencySignPattern {
@@ -134,7 +138,7 @@ export interface NumberILD {
 
 export interface NumberLocalePatternData {
   decimal: SignDisplayPattern;
-  percent: SignDisplayPattern;
+  percent: SignDisplayPattern<PercentNotationPattern>;
   currency: Record<string, CurrencyPattern>;
   unit: Record<string, UnitPattern>;
 }
